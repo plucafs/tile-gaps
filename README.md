@@ -14,7 +14,7 @@ Please note that this script does not do any automatic tiling. Its purpose is to
 
 ### Dependencies
 
-`kwin` on X11. 
+`kwin` on Plasma 6 (Wayland or X11). 
 
 ### Installation via graphical interface
 
@@ -39,15 +39,6 @@ cd tile-gaps
 
 You may need to uncheck the checkbox for the script, apply the settings, recheck, and reapply in order for the changes to take effect.
 
-In Plasma versions < 5.24, a bug in the KWin scripting system [[1]](https://bugs.kde.org/show_bug.cgi?id=411430) [[2]](https://bugs.kde.org/show_bug.cgi?id=444378) may cause the configuration not to be found. To fix this, please execute the following commands in a terminal:
-
-```bash
-sed -i 's/ConfigModule/Library/g' ~/.local/share/kwin/scripts/tilegaps/metadata.json
-mkdir -p ~/.local/share/kservices5/
-ln -sf ~/.local/share/kwin/scripts/tilegaps/metadata.json ~/.local/share/kservices5/tilegaps.json
-qdbus org.kde.KWin /KWin reconfigure
-```
-
 ### Screen edges
 
 Gap sizes are counted from the area that windows maximize to, i.e. from the edge of any panel you may have on that screen edge, rather than the outer screen edge itself.
@@ -67,10 +58,6 @@ For [Sticky Window Snapping](https://store.kde.org/p/1112552/) to work with gaps
 ### Applications
 
 To find the window class name of an application: Right-click on the titlebar of a window of the application > *More Actions* > *Configure Special Application Settings...* > the pre-filled entry in *Window class (application)* (if it consists of two words, only the second part) is the window class to put in the script configuration.
-
-## Issues
-
-The extension currently does not appear to work on Wayland. I'm working on finding out what causes it and how to fix it.
 
 ## Small Print
 

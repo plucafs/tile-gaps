@@ -29,6 +29,7 @@ const panel = {
 const config = {
     // layouts to apply gaps to
     includeMaximized: readConfig("includeMaximized", false),
+    forceDecoOnMax: readConfig("forceDecoOnMax", false),
     // list of excluded/included applications
     excludeMode: readConfig("excludeMode", true),
     includeMode: readConfig("includeMode", false),
@@ -52,6 +53,7 @@ function fulldebug(...args) {
         console.debug("tilegaps:", ...args);
     }
 }
+
 debug("intializing");
 debug("sizes (l/r/t/b/m):",
     gap.left, gap.right, gap.top, gap.bottom, gap.mid);
@@ -70,15 +72,25 @@ debug("");
 // block reapplying until current iteration is finished
 var block = false;
 
+// track maximize state explicitly (geometry-equality heuristic is unreliable on Wayland)
+var maximizeState = {};
+// capped re-assert guard: when we just forced a gapped-maximize geometry,
+// override a few times against the Wayland client's configure round-trips
+// so that gapped-M wins without looping forever
+var pendingMaximizeGap = {};
+// toggle tracking for the decorated gapped-maximize path (forceDecoOnMax)
+var restoreGeo = {};
+var gappedMaxState = {};
+
 // trigger debug output when client is activated
-workspace.clientActivated.connect(client => {
+workspace.windowActivated.connect(client => {
     if (!client) return;
     // debug(caption(client), geometry(client));
 });
 
 // trigger applying tile gaps when client is initially present or added
-workspace.clientList().forEach(client => onAdded(client));
-workspace.clientAdded.connect(onAdded);
+workspace.stackingOrder.forEach(client => onAdded(client));
+workspace.windowAdded.connect(onAdded);
 
 function onAdded(client) {
     debug("added", caption(client));
@@ -89,39 +101,79 @@ function onAdded(client) {
 
 // trigger applying tile gaps when client is moved or resized
 function onRegeometrized(client) {
-    client.moveResizedChanged.connect((client) => {
+    client.moveResizedChanged.connect(() => {
         debug("move resized changed", caption(client));
         applyGaps(client);
     });
-    client.frameGeometryChanged.connect((client) => {
+    client.frameGeometryChanged.connect(() => {
         debug("frame geometry changed", caption(client));
-        applyGaps(client)
+        const pending = pendingMaximizeGap[client.internalId];
+        if (pending) {
+            if (rectEqual(client.frameGeometry, pending.target)) {
+                delete pendingMaximizeGap[client.internalId];
+            } else if (pending.count > 0) {
+                pending.count--;
+                debug("re-assert gapped maximize", caption(client), pending.count);
+                client.frameGeometry = pending.target;
+                return;
+            } else {
+                debug("re-assert exhausted", caption(client));
+                delete pendingMaximizeGap[client.internalId];
+                // fall through to applyGaps
+            }
+        }
+        applyGaps(client);
     });
-    client.clientFinishUserMovedResized.connect((client) => {
+    client.interactiveMoveResizeFinished.connect(() => {
         debug("finish user moved resized", caption(client));
         applyGaps(client);
     });
-    client.fullScreenChanged.connect((client) => {
+    client.fullScreenChanged.connect(() => {
         debug("fullscreen changed", caption(client));
         applyGaps(client);
     });
-    client.clientMaximizedStateChanged.connect((client) => {
+    client.maximizedAboutToChange.connect((mode) => {
+        debug("maximize about to change", caption(client), mode);
+        maximizeState[client.internalId] = mode;
+        if (mode === 0) {
+            // MaximizeRestore: disarm the re-assert guard so it does not fight
+            // the unmaximize transition. For the decorated path, also clear
+            // gappedMaxState (restoreGeo is consumed/cleared in applyGapsArea).
+            delete pendingMaximizeGap[client.internalId];
+            if (config.forceDecoOnMax) {
+                delete gappedMaxState[client.internalId];
+            }
+        } else if (config.forceDecoOnMax) {
+            // About to maximize: save pre-maximize geometry A for toggle
+            // tracking (fires before KWin changes frameGeometry, so it's still A).
+            if (!gappedMaxState[client.internalId]) {
+                restoreGeo[client.internalId] = snapshotRect(client.frameGeometry);
+            }
+        }
+    });
+    client.maximizedChanged.connect(() => {
         debug("maximized changed", caption(client));
+        if (pendingMaximizeGap[client.internalId]) return;
         applyGaps(client);
     });
-    client.clientUnminimized.connect((client) => {
+    client.minimizedChanged.connect(() => {
+        if (client.minimized) return;
         debug("unminimized", caption(client));
         applyGaps(client);
     });
-    client.screenChanged.connect((client) => {
-        debug("screen changed", caption(client));
+    client.quickTileModeChanged.connect(() => {
+        debug("tile mode changed", caption(client));
         applyGaps(client);
     });
-    client.desktopChanged.connect((client) => {
-        debug("desktop changed", caption(client));
+    client.tileChanged.connect(() => {
+        debug("tile changed", caption(client));
         applyGaps(client);
     });
-    client.activitiesChanged.connect((client) => {
+    client.desktopsChanged.connect(() => {
+        debug("desktops changed", caption(client));
+        applyGaps(client);
+    });
+    client.activitiesChanged.connect(() => {
         debug("activities changed", caption(client));
         applyGaps(client);
     });
@@ -129,7 +181,7 @@ function onRegeometrized(client) {
 
 // trigger reapplying tile gaps for all windows when screen geometry changes
 function applyGapsAll() {
-    workspace.clientList().forEach(client => applyGaps(client));
+    workspace.stackingOrder.forEach(client => applyGaps(client));
 }
 
 onRelayouted();
@@ -139,20 +191,16 @@ function onRelayouted() {
         debug("current desktop changed");
         applyGapsAll();
     });
-    workspace.desktopPresenceChanged.connect(() => {
-        debug("desktop presence changed");
+    workspace.desktopLayoutChanged.connect(() => {
+        debug("desktop layout changed");
         applyGapsAll();
     });
-    workspace.numberDesktopsChanged.connect(() => {
-        debug("number desktops changed");
+    workspace.desktopsChanged.connect(() => {
+        debug("desktops changed");
         applyGapsAll();
     });
-    workspace.numberScreensChanged.connect(() => {
-        debug("number screens changed");
-        applyGapsAll();
-    });
-    workspace.screenResized.connect(() => {
-        debug("screen resized");
+    workspace.screensChanged.connect(() => {
+        debug("screens changed");
         applyGapsAll();
     });
     workspace.currentActivityChanged.connect(() => {
@@ -171,7 +219,7 @@ function onRelayouted() {
         debug("virtual screen geometry changed");
         applyGapsAll();
     });
-    workspace.clientAdded.connect((client) => {
+    workspace.windowAdded.connect((client) => {
         if (client.dock) {
             debug("dock added");
             applyGapsAll();
@@ -188,35 +236,103 @@ function onRelayouted() {
 function applyGaps(client) {
     // abort if there is a current iteration of gapping still running,
     // the client is null or irrelevant
-    debug("apply gaps", caption(client), config.includeMaximized, maximized(client));
+    debug("apply gaps", caption(client), config.includeMaximized, maximized(client), block);
     if (block || !client || ignoreClient(client)) return;
     // block applying other gaps as long as current iteration is running
     block = true;
     debug("----------------")
     debug("gaps for", caption(client));
     debug("old geo", geometry(client));
-    // make gaps to area grid
-    applyGapsArea(client);
-    // make gaps to other windows
-    applyGapsWindows(client);
+
+    const clientGeometries = workspace.stackingOrder.reduce((acc, c) => {
+        if (!ignoreClient(c)) {
+            acc[c.internalId] = snapshotRect(c.frameGeometry);
+        }
+        return acc;
+    }, {});
+
+    applyGapsArea(client, clientGeometries);
+    applyGapsWindows(client, clientGeometries);
+
+    for (const c of workspace.stackingOrder) {
+        if (c.internalId in clientGeometries && !rectEqual(c.frameGeometry, clientGeometries[c.internalId])) {
+            debug("set geometry", caption(c), geometry(clientGeometries[c.internalId]));
+            c.frameGeometry = clientGeometries[c.internalId];
+        }
+    }
+
     block = false;
 
     debug("");
 }
 
-function applyGapsArea(client) {
+function applyGapsArea(client, clientGeometries) {
+    const clientGeometry = clientGeometries[client.internalId];
     let area = getArea(client);
     debug("area", geometry(area));
+
+    // gapped-maximize path
+    if (config.includeMaximized && maximized(client)) {
+        if (config.forceDecoOnMax) {
+            // Decorated approach: unmaximize so the window gets a full border
+            // on all sides. Handle toggle via our own state tracking.
+            const saveKey = client.internalId;
+            if (gappedMaxState[saveKey]) {
+                debug("toggle off — restore saved geometry");
+                client.setMaximize(false, false);
+                if (restoreGeo[saveKey]) {
+                    clientGeometries[saveKey] = restoreGeo[saveKey];
+                    pendingMaximizeGap[saveKey] = { target: restoreGeo[saveKey], count: 3 };
+                }
+                delete gappedMaxState[saveKey];
+                delete restoreGeo[saveKey];
+                client.noBorder = false;
+                return;
+            }
+            debug("gapped maximize (decorated)");
+            client.setMaximize(false, false);
+            let panelL = panel.left   ? 0 : gap.left;
+            let panelR = panel.right  ? 0 : gap.right;
+            let panelT = panel.top    ? 0 : gap.top;
+            let panelB = panel.bottom ? 0 : gap.bottom;
+            let target = {
+                x:      area.x      + panelL,
+                y:      area.y      + panelT,
+                width:  area.width  - panelL - panelR,
+                height: area.height - panelT - panelB,
+            };
+            debug("gapped maximize target", geometry(target));
+            clientGeometries[saveKey] = target;
+            pendingMaximizeGap[saveKey] = { target: target, count: 3 };
+            gappedMaxState[saveKey] = true;
+            client.noBorder = false;
+            return;
+        }
+
+        // Plain maximize state: keep the maximize state for natural toggle
+        // (titlebar visible, no side border; guard-disarm on Restore handles toggle)
+        debug("gapped maximize");
+        let panelL = panel.left   ? 0 : gap.left;
+        let panelR = panel.right  ? 0 : gap.right;
+        let panelT = panel.top    ? 0 : gap.top;
+        let panelB = panel.bottom ? 0 : gap.bottom;
+        let target = {
+            x:      area.x      + panelL,
+            y:      area.y      + panelT,
+            width:  area.width  - panelL - panelR,
+            height: area.height - panelT - panelB,
+        };
+        debug("gapped maximize target", geometry(target));
+        clientGeometries[client.internalId] = target;
+        pendingMaximizeGap[client.internalId] = { target: target, count: 3 };
+        client.noBorder = false;
+        return;
+    }
+
     let grid = getGrid(client);
     let anchored = {"left": false, "right": false, "top": false, "bottom": false};
-    let gridded = Object.assign({}, client.frameGeometry);
-    let edged = Object.assign({}, client.frameGeometry);
-    
-    // unmaximize if maximized window gap
-    if (config.includeMaximized && maximized(client)) {
-        debug("unmaximize");
-        client.setMaximize(false, false);
-    }
+    let gridded = snapshotRect(clientGeometry);
+    let edged = snapshotRect(clientGeometry);
 
     // for each window edge, if the edge is near some grid anchor of that edge,
     // set it to the gapped coordinate
@@ -225,7 +341,7 @@ function applyGapsArea(client) {
         for (let j = 0; j < Object.keys(grid[edge]).length; j++) {
             let pos = Object.keys(grid[edge])[j];
             let coords = grid[edge][pos];
-            coords["win"] = client.frameGeometry[edge];
+            coords["win"] = clientGeometry[edge];
             if (nearArea(coords.win, coords.closed, coords.gapped, gap[edge])) {
                 debug("gap to edge", edge, pos, coords.gapped);
                 anchored[edge] = true;
@@ -273,35 +389,30 @@ function applyGapsArea(client) {
     }
     // apply geo gapped on inner anchors if client is anchored on every side,
     // otherwise geo gapped on outer edges
-    if (Object.keys(grid).every((edge) => anchored[edge]) && client.frameGeometry != gridded) {
+    if (Object.keys(grid).every((edge) => anchored[edge]) && !rectEqual(clientGeometry, gridded)) {
         debug("set grid geometry", geometry(gridded));
-        client.frameGeometry = gridded;
-    } else if (client.frameGeometry != edged) {
+        clientGeometries[client.internalId] = gridded;
+    } else if (!rectEqual(clientGeometry, edged)) {
         debug("set edge geometry", geometry(edged));
-        client.frameGeometry = edged;
+        clientGeometries[client.internalId] = edged;
     }
 }
 
-function applyGapsWindows(client1) {
+function applyGapsWindows(client1, clientGeometries) {
     let area = getArea(client1);
     let grid = getGrid(client1);
-
-    debug("apply gaps windows");
-
-    let win1 = Object.assign({}, client1.frameGeometry);
+    let win1 = clientGeometries[client1.internalId];
 
     // for each other window, if they share an edge,
     // clip or extend both evenly to make the distance the size of the gap
-    for (let j = 0; j < workspace.clientList().length; j++) {
-        let client2 = workspace.clientList()[j];
+    for (const client2 of workspace.stackingOrder) {
         if (!client2) continue;
         if (ignoreOther(client1, client2)) continue;
 
         debug("checking", client2.caption);
         debug(geometry(client1), geometry(client2));
 
-        let win2 = Object.assign({}, client2.frameGeometry);
-        
+        let win2 = clientGeometries[client2.internalId];
         for (let i = 0; i < Object.keys(grid).length; i++) {
             let edge = Object.keys(grid)[i];
             switch (edge) {
@@ -368,15 +479,8 @@ function applyGapsWindows(client1) {
             }
         }
 
-        if (client2.frameGeometry != win2) {
-            debug("set neighboring geometry", geometry(win2));
-            client2.frameGeometry = win2;
-        }
-    }
-
-    if (client1.frameGeometry != win1) {
-        debug("set neighbored geometry", geometry(win1));
-        client1.frameGeometry = win1;
+        clientGeometries[client1.internalId] = win1;
+        clientGeometries[client2.internalId] = win2;
     }
 }
 
@@ -474,9 +578,24 @@ function getGrid(client) {
 // geometry computation
 ///////////////////////
 
-// a client is maximized iff its geometry is equal to the maximize area
+// snapshot a QRectF into a plain JS object so its fields can be mutated safely
+function snapshotRect(r) {
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+}
+
+// compare two rect-shaped objects by value
+function rectEqual(a, b) {
+    return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+}
+
+// a client is maximized according to the tracked maximize state;
+// falls back to a geometry-equality heuristic before the first signal fires.
+// MaximizeRestore == 0 in KWin's MaximizeMode enum; we use the numeric literal
+// because the enum constant is not guaranteed to be exposed on the KWin JS global.
 function maximized(client) {
-    return client.geometry == workspace.clientArea(KWin.MaximizeArea, client);
+    const m = maximizeState[client.internalId];
+    if (m !== undefined) return m !== 0;
+    return rectEqual(client.frameGeometry, workspace.clientArea(KWin.MaximizeArea, client));
 }
 
 // a coordinate is close to another iff
@@ -485,7 +604,7 @@ function maximized(client) {
 function nearArea(actual, expected_closed, expected_gapped, gap) {
     let tolerance = gap;
     return (Math.abs(actual - expected_closed) <= tolerance
-         || Math.abs(actual - expected_gapped) <= tolerance);
+        || Math.abs(actual - expected_gapped) <= tolerance);
 }
 
 function nearWindow(win1, win2, gap) {
@@ -500,17 +619,17 @@ function nearWindow(win1, win2, gap) {
 function overlapHor(win1, win2) {
     let tolerance = 2 * gap.mid;
     return (win1.left <= win2.left + tolerance
-         && win1.right > win2.left + tolerance)
+            && win1.right > win2.left + tolerance)
         || (win2.left <= win1.left + tolerance
-        &&  win2.right + tolerance > win1.left);
+            && win2.right + tolerance > win1.left);
 }
 
 function overlapVer(win1, win2) {
     let tolerance = 2 * gap.mid;
     return (win1.top <= win2.top + tolerance
-         && win1.bottom > win2.top + tolerance)
+            && win1.bottom > win2.top + tolerance)
         || (win2.top <= win1.top + tolerance
-         && win2.bottom + tolerance > win1.top);
+            && win2.bottom + tolerance > win1.top);
 }
 
 // floored/ceiled half difference between edges
@@ -553,10 +672,10 @@ function ignoreClient(client) {
 
 function ignoreOther(client1, client2) {
     return ignoreClient(client2) // excluded
-        || client2 == client1 // identicalb
-        || !(client2.desktop == client1.desktop // same desktop
-             || client2.onAllDesktops || client1.onAllDesktops)
-        || !(client2.screen == client1.screen) // different screen
+        || client2 == client1 // identical
+        || !(client1.desktops.some(d => client2.desktops.includes(d)) // same desktop
+            || client2.onAllDesktops || client1.onAllDesktops)
+        || !(client2.output === client1.output) // different screen
         || client2.minimized; // minimized
 }
 
@@ -578,6 +697,6 @@ function caption(client) {
 // stringify client geometry
 function geometry(client) {
     return ["x", client.x, client.width, client.x + client.width,
-            "y", client.y, client.height, client.y + client.height
+        "y", client.y, client.height, client.y + client.height
     ].join(" ");
 }

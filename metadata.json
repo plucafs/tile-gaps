@@ -1,4 +1,5 @@
 {
+    "KPackageStructure": "KWin/Script",
     "KPlugin": {
         "Authors": [
             {
@@ -18,7 +19,7 @@
             "KWin/Script",
             "KCModule"
         ],
-        "Version": "8.0",
+        "Version": "9.0",
         "Website": "https://store.kde.org/p/1619642"
     },
     "X-KDE-ConfigModule": "kwin/effects/configs/kcm_kwin4_genericscripted",

@@ -61,6 +61,10 @@
             <label>List of applications to be excluded or included</label>
             <default></default>
         </entry>
+        <entry name="forceDecoOnMax" type="bool">
+            <label>Whether to keep the window decoration frame when gapped-maximized</label>
+            <default>false</default>
+        </entry>
         <entry name="debugMode" type="bool">
             <label>Whether to log debug information</label>
             <default>true</default>
